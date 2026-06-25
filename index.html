@@ -1084,7 +1084,7 @@
             },
             {
                 id: 'jd', name: '京东订单', icon: '🟣', color: '#8b5cf6',
-                tip: { icon: '✂️', text: '自动去重 + 以第一个空格拆分属性' },
+                tip: { icon: '✂️', text: '按(订单号+商品)合并 + 拆分属性' },
                 config: {
                     keepCols: ['订单号', '商品属性', '订购数量', '商品名称', '商家应收', '订单状态', '付款确认时间', '商家备注'],
                     rawCols: { orderNo: '订单号', prodName: '商品名称', qty: '订购数量', price: '商家应收', status: '订单状态', payTime: '付款确认时间', memo: '商家备注' },
@@ -1199,14 +1199,38 @@
                     if (platform === 'jd') {
                         var jdCfg = PLATFORMS.find(function(x) { return x.id === 'jd'; }).config.rawCols;
                         var orderCol = jdCfg.orderNo;
-                        if (headers.indexOf(orderCol) !== -1) {
-                            var seen = new Set();
-                            finalData = finalData.filter(function(row) {
-                                var k = String(row[orderCol] || '');
-                                if (seen.has(k)) return false; seen.add(k); return true;
-                            });
-                        }
                         var nameCol = jdCfg.prodName;
+                        var qtyCol = jdCfg.qty;
+                        var priceCol = jdCfg.price;
+
+                        // 京东去重：按 (订单号 + 商品名称) 分组，合并数量和金额
+                        // 同一订单买多个SKU → 每个SKU保留一行；完全相同的行 → 合并数量
+                        if (headers.indexOf(orderCol) !== -1 && headers.indexOf(nameCol) !== -1) {
+                            var grouped = {};
+                            finalData.forEach(function(row) {
+                                var oNo = String(row[orderCol] || '').trim();
+                                var pName = String(row[nameCol] || '').trim();
+                                var key = oNo + '|||' + pName;
+
+                                if (!grouped[key]) {
+                                    grouped[key] = Object.assign({}, row);
+                                } else {
+                                    // 合并数量
+                                    var existQty = parseFloat(grouped[key][qtyCol]) || 0;
+                                    var newQty = parseFloat(row[qtyCol]) || 0;
+                                    grouped[key][qtyCol] = existQty + newQty;
+                                    // 合并金额
+                                    if (priceCol && headers.indexOf(priceCol) !== -1) {
+                                        var existPrice = parseFloat(grouped[key][priceCol]) || 0;
+                                        var newPrice = parseFloat(row[priceCol]) || 0;
+                                        grouped[key][priceCol] = existPrice + newPrice;
+                                    }
+                                }
+                            });
+                            finalData = Object.values(grouped);
+                        }
+
+                        // 拆分商品名称：第一个空格前为商品名，之后为SKU属性
                         if (headers.indexOf(nameCol) !== -1) {
                             finalData = finalData.map(function(row) {
                                 var fullName = String(row[nameCol] || '');
@@ -1364,29 +1388,63 @@
                 }
 
                 rows.forEach(function(row) {
+                    // 提取 SKU：优先用商品名称，其次商品标题、商品
                     var skuName = row['商品'] || row['商品标题'] || row['商品名称'] || '';
                     var qty = row['购买数量'] || row['商品数量(件)'] || row['订购数量'] || 1;
                     var receiver = row['主订单编号'] || row['订单号'] || '';
-                    var type = 'New';
+
+                    // 核心：按备注逐行分流 — 同一个SKU根据备注走不同映射表
+                    var type = 'New'; // 默认新款
                     if (noteCol && row[noteCol]) {
                         var note = String(row[noteCol]).trim();
+                        // "旧"优先判断：备注含"旧" → 旧款映射表（即使SKU是新款）
                         if (note.indexOf('旧') !== -1) type = 'Old';
+                        // 备注含"新" → 新款映射表（拍错纠正：旧机器买了新试纸，备注标"新"）
                         else if (note.indexOf('新') !== -1) type = 'New';
                     }
                     orderDatas[type].push({ '收件人信息': receiver, 'sku名称': skuName, '购买数量': parseQty(qty) });
                 });
             });
 
+            // 检查是否满足自动上传条件（映射文件名或筛选关键词含"新"/"旧"）
+            var condNew = isConditionMet('新', 'New');
+            var condOld = isConditionMet('旧', 'Old');
+
+            // 更新订单数据状态显示
+            var orderInfoNew = document.getElementById('orderInfoNew');
+            var orderInfoOld = document.getElementById('orderInfoOld');
+            if (orderDatas.New.length > 0 && condNew) {
+                if (orderInfoNew) {
+                    orderInfoNew.textContent = '自动导入 ' + orderDatas.New.length + ' 条';
+                    orderInfoNew.className = 'm1-file-status';
+                }
+            }
+            if (orderDatas.Old.length > 0 && condOld) {
+                if (orderInfoOld) {
+                    orderInfoOld.textContent = '自动导入 ' + orderDatas.Old.length + ' 条';
+                    orderInfoOld.className = 'm1-file-status';
+                }
+            }
+
+            // 触发备货单自动生成
             checkReady('New'); checkReady('Old');
+
+            // 状态栏 + Toast 提示
             if (orderDatas.New.length > 0) {
                 var elNew = document.getElementById('m1StatusNew');
-                elNew.innerHTML = '✅ 自动分流：接收新款订单 ' + orderDatas.New.length + ' 条。备货单将自动生成。';
+                elNew.innerHTML = '✅ 自动分流：接收新款订单 ' + orderDatas.New.length + ' 条（按备注逐行匹配）。备货单将自动生成。';
                 elNew.className = 'm1-status info';
+                if (condNew) {
+                    showToast('已按备注逐行分流：新款订单 ' + orderDatas.New.length + ' 条 → 新款映射表', 'info', 3500);
+                }
             }
             if (orderDatas.Old.length > 0) {
                 var elOld = document.getElementById('m1StatusOld');
-                elOld.innerHTML = '✅ 自动分流：接收旧款订单 ' + orderDatas.Old.length + ' 条。备货单将自动生成。';
+                elOld.innerHTML = '✅ 自动分流：接收旧款订单 ' + orderDatas.Old.length + ' 条（按备注逐行匹配）。备货单将自动生成。';
                 elOld.className = 'm1-status info';
+                if (condOld) {
+                    showToast('已按备注逐行分流：旧款订单 ' + orderDatas.Old.length + ' 条 → 旧款映射表', 'info', 3500);
+                }
             }
         }
 
@@ -1447,43 +1505,6 @@
                 if (allMergedItems.length > 100) sumBodyHtml += '<tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:6px;">... 预览前100条，共 ' + allMergedItems.length + ' 条 ...</td></tr>';
                 document.getElementById('summaryBody').innerHTML = sumBodyHtml;
                 setupScrollIndicator(document.getElementById('summaryScroll'));
-
-                // ===== 自动上传前三列到 新款/旧款 订单数据 =====
-                // 新款：匹配文件名或关键词含"新"
-                if (isConditionMet('新', 'New')) {
-                    orderDatas.New = allMergedItems.map(function(item) {
-                        return {
-                            '收件人信息': item['主订单编号'] || '',
-                            'sku名称': item['商品属性'] || '',
-                            '购买数量': parseQty(item['购买数量'])
-                        };
-                    });
-                    var orderInfoElNew = document.getElementById('orderInfoNew');
-                    if (orderInfoElNew) {
-                        orderInfoElNew.textContent = '自动导入 ' + orderDatas.New.length + ' 条';
-                        orderInfoElNew.className = 'm1-file-status';
-                    }
-                    checkReady('New');
-                    showToast('检测到"新"条件，汇总表前三列已自动上传至新款订单数据（' + orderDatas.New.length + ' 条）', 'info', 4000);
-                }
-
-                // 旧款：匹配文件名或关键词含"旧"
-                if (isConditionMet('旧', 'Old')) {
-                    orderDatas.Old = allMergedItems.map(function(item) {
-                        return {
-                            '收件人信息': item['主订单编号'] || '',
-                            'sku名称': item['商品属性'] || '',
-                            '购买数量': parseQty(item['购买数量'])
-                        };
-                    });
-                    var orderInfoElOld = document.getElementById('orderInfoOld');
-                    if (orderInfoElOld) {
-                        orderInfoElOld.textContent = '自动导入 ' + orderDatas.Old.length + ' 条';
-                        orderInfoElOld.className = 'm1-file-status';
-                    }
-                    checkReady('Old');
-                    showToast('检测到"旧"条件，汇总表前三列已自动上传至旧款订单数据（' + orderDatas.Old.length + ' 条）', 'info', 4000);
-                }
             } else {
                 document.getElementById('summaryCount').innerText = '共 0 条';
                 document.getElementById('summaryDownloadBtn').disabled = true;
