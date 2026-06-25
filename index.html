@@ -1203,7 +1203,7 @@
                         var qtyCol = jdCfg.qty;
                         var priceCol = jdCfg.price;
 
-                        // 京东去重：按 (订单号 + 商品名称) 分组，合并数量和金额
+                        // 京东去重第1步：按 (订单号 + 商品名称) 分组，合并数量
                         // 同一订单买多个SKU → 每个SKU保留一行；完全相同的行 → 合并数量
                         if (headers.indexOf(orderCol) !== -1 && headers.indexOf(nameCol) !== -1) {
                             var grouped = {};
@@ -1215,19 +1215,45 @@
                                 if (!grouped[key]) {
                                     grouped[key] = Object.assign({}, row);
                                 } else {
-                                    // 合并数量
+                                    // 合并数量（同订单+同商品）
                                     var existQty = parseFloat(grouped[key][qtyCol]) || 0;
                                     var newQty = parseFloat(row[qtyCol]) || 0;
                                     grouped[key][qtyCol] = existQty + newQty;
-                                    // 合并金额
-                                    if (priceCol && headers.indexOf(priceCol) !== -1) {
-                                        var existPrice = parseFloat(grouped[key][priceCol]) || 0;
-                                        var newPrice = parseFloat(row[priceCol]) || 0;
-                                        grouped[key][priceCol] = existPrice + newPrice;
-                                    }
+                                    // 金额不累加，保留原值（同一商品行金额通常相同）
                                 }
                             });
                             finalData = Object.values(grouped);
+                        }
+
+                        // 京东去重第2步：同订单号下，去掉重复的订单总金额
+                        // 如果同一订单多个SKU的商家应收相同 → 说明是订单总金额，只保留第一个，其余置0
+                        // 如果金额各不相同 → 说明是分SKU的金额，全部保留
+                        if (headers.indexOf(orderCol) !== -1 && priceCol && headers.indexOf(priceCol) !== -1) {
+                            var orderGroups = {};
+                            finalData.forEach(function(row) {
+                                var oNo = String(row[orderCol] || '').trim();
+                                if (!orderGroups[oNo]) orderGroups[oNo] = [];
+                                orderGroups[oNo].push(row);
+                            });
+
+                            Object.keys(orderGroups).forEach(function(oNo) {
+                                var rows = orderGroups[oNo];
+                                if (rows.length <= 1) return;
+
+                                // 检查该订单号下所有行的商家应收是否全部相同
+                                var firstPrice = parseFloat(rows[0][priceCol]) || 0;
+                                var allSame = rows.every(function(r) {
+                                    return (parseFloat(r[priceCol]) || 0) === firstPrice;
+                                });
+
+                                if (allSame && firstPrice !== 0) {
+                                    // 金额全部相同 → 是订单总金额，只保留第一行，其余置0
+                                    for (var r = 1; r < rows.length; r++) {
+                                        rows[r][priceCol] = 0;
+                                    }
+                                }
+                                // 金额不同 → 说明是分SKU的金额，全部保留原值
+                            });
                         }
 
                         // 拆分商品名称：第一个空格前为商品名，之后为SKU属性
