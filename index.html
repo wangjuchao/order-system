@@ -1414,8 +1414,8 @@
                 }
 
                 rows.forEach(function(row) {
-                    // 提取 SKU：优先用商品名称，其次商品标题、商品
-                    var skuName = row['商品'] || row['商品标题'] || row['商品名称'] || '';
+                    // 提取 SKU：优先用商品属性/规格（对应物料表SKU），其次商品名
+                    var skuName = row['商品属性'] || row['商品规格'] || row['商品'] || row['商品标题'] || row['商品名称'] || '';
                     var qty = row['购买数量'] || row['商品数量(件)'] || row['订购数量'] || 1;
                     var receiver = row['主订单编号'] || row['订单号'] || '';
 
